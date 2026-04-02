@@ -72,15 +72,13 @@ int main(void) {
     // Enable SPI
     SPI1_CR1 |= (1 << 6);     // SPE = 1
 
-    // Main loop: receive a byte, respond with byte + 1
+    // Main loop: echo back every byte received (for latency testing)
     while (1) {
-        // Wait for receive buffer not empty
         if (SPI1_SR & SPI_SR_RXNE) {
             uint8_t received = (uint8_t)SPI1_DR;
 
-            // Wait for TX buffer empty, then load response
             while (!(SPI1_SR & SPI_SR_TXE));
-            SPI1_DR = received + 1;
+            SPI1_DR = received;  // echo exact same byte
         }
     }
 }
