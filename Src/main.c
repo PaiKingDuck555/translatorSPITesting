@@ -90,16 +90,29 @@ int main(void) {
     SPI1_CR1 |= (1 << 6);             // SPE = 1
 
     // --- Main loop ---
-    while (1) {
-        if (SPI1_SR & SPI_SR_RXNE) {
-            (void)SPI1_DR;             // discard Pi's byte
+    uint8_t button_stable = 0;  // debounced button state: 0=released, 1=pressed
+    uint32_t debounce_count = 0;
+    #define DEBOUNCE_THRESHOLD 5000  // number of loop iterations to confirm state change
 
-            // Check button: PC13, active LOW (pressed = 0)
-            if (!(GPIOC_IDR & (1 << 13))) {
-                // Button pressed — read mic, send audio sample
+    while (1) {
+        // Debounce: only change state after consistent readings
+        uint8_t raw = !(GPIOC_IDR & (1 << 13));  // 1 = pressed, 0 = released
+        if (raw == button_stable) {
+            debounce_count = 0;
+        } else {
+            debounce_count++;
+            if (debounce_count >= DEBOUNCE_THRESHOLD) {
+                button_stable = raw;
+                debounce_count = 0;
+            }
+        }
+
+        if (SPI1_SR & SPI_SR_RXNE) {
+            (void)SPI1_DR;
+
+            if (button_stable) {
                 SPI1_DR = adc_read_8bit();
             } else {
-                // Button not pressed — send idle marker
                 SPI1_DR = IDLE_MARKER;
             }
         }

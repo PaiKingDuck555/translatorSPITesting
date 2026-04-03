@@ -31,12 +31,17 @@ while True:
         print("Recording...", end='', flush=True)
         audio_samples = []
         audio_samples.append(resp[0])  # first sample
+        idle_count = 0
 
         while True:
             resp = spi.xfer2([0x00])
             if resp[0] == IDLE_MARKER:
-                break
-            audio_samples.append(resp[0])
+                idle_count += 1
+                if idle_count > 500:  # ~500 consecutive idle reads = truly released
+                    break
+            else:
+                idle_count = 0  # reset — button still held
+                audio_samples.append(resp[0])
             time.sleep(POLL_INTERVAL)
 
         duration = len(audio_samples) / SAMPLE_RATE
@@ -62,8 +67,11 @@ while True:
             wf.writeframes(bytes(audio_bytes))
 
         # Transcribe
-        print("Transcribing...")
-        result = model.transcribe(wav_path)
+        print(f"Transcribing {duration:.1f}s of audio...")
+        start_time = time.time()
+        result = model.transcribe(wav_path, fp16=False, language="en")
+        elapsed = time.time() - start_time
+        print(f"Transcription took {elapsed:.1f}s")
         print(f"\n>>> {result['text'].strip()}\n")
         print("Press button to record again...")
 
