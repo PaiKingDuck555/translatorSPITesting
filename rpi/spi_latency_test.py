@@ -33,8 +33,8 @@ print(f"Max:     {max(times) / 1000:.1f} us")
 # --- Test 2: Bulk transfer (1 second of audio) ---
 print(f"\n=== Bulk Transfer: {total_bytes} bytes ({DURATION}s of {SAMPLE_RATE} Hz audio) ===")
 
-# Send in chunks (spidev has a max transfer size)
-CHUNK_SIZE = 4096
+# Send in small chunks with a gap so STM32 can keep up
+CHUNK_SIZE = 1  # 1 byte at a time — safest, we'll increase once it works
 chunks = [test_data[i:i+CHUNK_SIZE] for i in range(0, len(test_data), CHUNK_SIZE)]
 
 errors = 0
