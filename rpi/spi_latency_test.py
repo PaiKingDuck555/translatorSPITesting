@@ -74,5 +74,40 @@ for speed in [500000, 1000000, 2000000, 4000000, 8000000]:
     actual_kbps = (1024 * 10 * 8) / elapsed / 1000
     print(f"  {speed/1000000:.1f} MHz → {actual_kbps:.0f} kbps actual throughput")
 
+# --- Test 4: Read STM32 internal cycle counts ---
+print("\n=== STM32 Internal Timing ===")
+spi.max_speed_hz = 1000000
+
+# Send a few normal bytes first to generate timing data
+for i in range(10):
+    spi.xfer2([i])
+
+# Request timing from STM32
+# 0xFF = report max cycles, 0xFE = report min cycles
+resp_max = spi.xfer2([0xFF])
+time.sleep(0.001)
+max_cycles = spi.xfer2([0x00])[0]  # actual response comes on next transfer
+
+resp_min = spi.xfer2([0xFE])
+time.sleep(0.001)
+min_cycles = spi.xfer2([0x00])[0]
+
+cpu_freq = 16_000_000  # 16 MHz HSI default
+print(f"STM32 CPU frequency: {cpu_freq/1000000:.0f} MHz")
+print(f"Max processing cycles: {max_cycles}")
+print(f"Min processing cycles: {min_cycles}")
+print(f"Max processing time: {max_cycles / cpu_freq * 1_000_000:.2f} us")
+print(f"Min processing time: {min_cycles / cpu_freq * 1_000_000:.2f} us")
+
+print(f"\n=== Can the STM32 Keep Up? ===")
+for speed in [500000, 1000000, 2000000, 4000000, 8000000]:
+    byte_time_us = 8 / speed * 1_000_000
+    process_us = max_cycles / cpu_freq * 1_000_000
+    margin = byte_time_us - process_us
+    status = "OK" if margin > 0 else "OVERRUN"
+    print(f"  {speed/1000000:.1f} MHz: byte every {byte_time_us:.2f} us, "
+          f"STM32 needs {process_us:.2f} us, "
+          f"margin {margin:.2f} us → {status}")
+
 spi.close()
 print("\nDone!")

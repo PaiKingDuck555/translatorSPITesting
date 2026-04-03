@@ -27,6 +27,10 @@
 #define GPIOA_AFRL    (*(volatile uint32_t *)0x40020020)
 #define GPIOA_ODR     (*(volatile uint32_t *)0x40020014)
 
+// GPIOB (for timing debug pin)
+#define GPIOB_MODER   (*(volatile uint32_t *)0x40020400)
+#define GPIOB_ODR     (*(volatile uint32_t *)0x40020414)
+
 // SPI1
 #define SPI1_CR1      (*(volatile uint32_t *)0x40013000)
 #define SPI1_CR2      (*(volatile uint32_t *)0x40013004)
@@ -37,48 +41,76 @@
 #define SPI_SR_RXNE   (1 << 0)
 #define SPI_SR_TXE    (1 << 1)
 
-// LED on PA5 won't work anymore (used for SCK), so use built-in LED if available
-// We'll use GPIOA pin 0 (A0) as a debug toggle — optional
+// DWT cycle counter (built into Cortex-M4, counts every CPU cycle)
+#define DWT_CONTROL   (*(volatile uint32_t *)0xE0001000)
+#define DWT_CYCCNT    (*(volatile uint32_t *)0xE0001004)
+#define SCB_DEMCR     (*(volatile uint32_t *)0xE000EDFC)
+
+// Timing results stored in RAM — read via debugger or send over SPI
+volatile uint32_t cycle_min = 0xFFFFFFFF;
+volatile uint32_t cycle_max = 0;
+volatile uint32_t cycle_total = 0;
+volatile uint32_t byte_count = 0;
 
 int main(void) {
     // Step 1: Enable clocks
-    RCC_AHB1ENR |= (1 << 0);   // GPIOA clock enable
+    RCC_AHB1ENR |= (1 << 0) | (1 << 1);  // GPIOA + GPIOB clock enable
     RCC_APB2ENR |= (1 << 12);  // SPI1 clock enable
 
+    // Configure PB0 as output (debug/timing pin)
+    GPIOB_MODER &= ~(3 << 0);
+    GPIOB_MODER |=  (1 << 0);  // PB0 = output
+
+    // Enable DWT cycle counter (counts every CPU clock cycle)
+    SCB_DEMCR |= (1 << 24);    // enable trace
+    DWT_CYCCNT = 0;             // reset counter
+    DWT_CONTROL |= 1;           // start counting
+
     // Step 2: Configure PA5 (SCK), PA6 (MISO), PA7 (MOSI)
-    //         to Alternate Function mode (MODER = 10)
-    //         PA5=[11:10], PA6=[13:12], PA7=[15:14]
     GPIOA_MODER &= ~((3 << 10) | (3 << 12) | (3 << 14));
     GPIOA_MODER |=  ((2 << 10) | (2 << 12) | (2 << 14));
 
-    // Set AF5 (SPI1) for PA5, PA6, PA7 in AFRL register
-    // Each pin gets 4 bits in AFRL: PA5=[23:20], PA6=[27:24], PA7=[31:28]
     GPIOA_AFRL &= ~((0xF << 20) | (0xF << 24) | (0xF << 28));
     GPIOA_AFRL |=  ((5 << 20) | (5 << 24) | (5 << 28));
 
     // Step 3: Configure SPI1 as slave
-    SPI1_CR1 = 0;              // Reset CR1
-    // MSTR = 0 (slave mode) — already 0
-    // CPOL = 0, CPHA = 0 (SPI mode 0 — must match Pi side)
-    // DFF = 0 (8-bit data)
-    // SSM = 1, SSI = 0 (software NSS, force slave selected)
-    SPI1_CR1 |= (1 << 9);     // SSM = 1 (software slave management)
-
-    SPI1_CR2 = 0;              // Reset CR2
-
-    // Pre-load first response byte into DR
+    SPI1_CR1 = 0;
+    SPI1_CR1 |= (1 << 9);     // SSM = 1
+    SPI1_CR2 = 0;
     SPI1_DR = 0xAA;
-
-    // Enable SPI
     SPI1_CR1 |= (1 << 6);     // SPE = 1
 
-    // Main loop: echo back every byte received (for latency testing)
+    // Main loop: echo + measure cycle count
     while (1) {
         if (SPI1_SR & SPI_SR_RXNE) {
+            GPIOB_ODR |= (1 << 0);        // PB0 HIGH — processing starts
+
+            uint32_t start = DWT_CYCCNT;   // snapshot cycle counter
+
             uint8_t received = (uint8_t)SPI1_DR;
 
             while (!(SPI1_SR & SPI_SR_TXE));
-            SPI1_DR = received;  // echo exact same byte
+
+            // Command 0xFF = report timing, otherwise echo
+            if (received == 0xFF) {
+                // Send back cycle_max as the response (most useful metric)
+                SPI1_DR = (uint8_t)(cycle_max & 0xFF);
+            } else if (received == 0xFE) {
+                // Send back cycle_min
+                SPI1_DR = (uint8_t)(cycle_min & 0xFF);
+            } else {
+                SPI1_DR = received;
+            }
+
+            uint32_t elapsed = DWT_CYCCNT - start;  // cycles used
+
+            // Track min/max/average
+            if (elapsed < cycle_min) cycle_min = elapsed;
+            if (elapsed > cycle_max) cycle_max = elapsed;
+            cycle_total += elapsed;
+            byte_count++;
+
+            GPIOB_ODR &= ~(1 << 0);       // PB0 LOW — processing done
         }
     }
 }
