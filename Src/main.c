@@ -66,22 +66,18 @@ int main(void) {
     SPI1_CR1 = 0;
     SPI1_CR1 |= (1 << 9);     // SSM = 1
     SPI1_CR2 = 0;
-    SPI1_DR = 0xAA;
     SPI1_CR1 |= (1 << 6);     // SPE = 1
 
-    // Main loop
+    // Wait for first byte to arrive
+    while (!(SPI1_SR & SPI_SR_RXNE));
+    uint8_t last_received = (uint8_t)SPI1_DR;
+    SPI1_DR = last_received;   // load echo immediately
+
+    // Main loop — tight as possible
     while (1) {
-        uint32_t sr = SPI1_SR;
-
-        if (sr & SPI_SR_OVR) {
-            (void)SPI1_DR;
-            (void)SPI1_SR;
-        }
-
-        if (sr & SPI_SR_RXNE) {
-            GPIOB_ODR |= (1 << 0);          // PB0 HIGH — start processing
-            SPI1_DR = (uint8_t)SPI1_DR;      // read + echo
-            GPIOB_ODR &= ~(1 << 0);         // PB0 LOW  — done processing
+        if (SPI1_SR & SPI_SR_RXNE) {
+            last_received = (uint8_t)SPI1_DR;
+            SPI1_DR = last_received;
         }
     }
 }
