@@ -1,8 +1,8 @@
 import spidev
 import time
 import wave
-import array
-import sounddevice as sd
+import os
+import math
 
 # --- SPI Setup ---
 spi = spidev.SpiDev()
@@ -11,29 +11,21 @@ spi.max_speed_hz = 1000000
 spi.mode = 0
 
 SAMPLE_RATE = 16000
-RECORD_SECONDS = 5
+DURATION = 5  # seconds
+total_samples = SAMPLE_RATE * DURATION
 
-# --- Step 1: Record audio from USB mic ---
-audio = array.array('h')
+# --- Step 1: Generate fake audio (440 Hz sine wave, 16-bit) ---
+print(f"Generating {DURATION}s of fake audio (440 Hz sine wave)...")
 
-def callback(indata, frames, time_info, status):
-    audio.frombytes(indata)
+audio_bytes = bytearray()
+for i in range(total_samples):
+    sample = int(16000 * math.sin(2 * math.pi * 440 * i / SAMPLE_RATE))
+    audio_bytes += sample.to_bytes(2, byteorder='little', signed=True)
 
-stream = sd.RawInputStream(
-    samplerate=SAMPLE_RATE,
-    channels=1,
-    dtype='int16',
-    callback=callback
-)
+audio_list = list(audio_bytes)
+print(f"Generated {len(audio_bytes)} bytes")
 
-print(f"Recording {RECORD_SECONDS}s from USB mic...")
-with stream:
-    time.sleep(RECORD_SECONDS)
-
-audio_bytes = audio.tobytes()
-print(f"Recorded {len(audio)} samples ({len(audio_bytes)} bytes)")
-
-# --- Step 2: Send audio over SPI, get echo back ---
+# --- Step 2: Send over SPI, get echo back ---
 print(f"Sending to STM32...")
 
 received_bytes = bytearray()
@@ -42,7 +34,7 @@ prev_sent = None
 
 start = time.perf_counter()
 
-for i, byte_val in enumerate(audio_bytes):
+for i, byte_val in enumerate(audio_list):
     resp = spi.xfer2([byte_val])
     received_bytes.append(resp[0])
 
@@ -62,7 +54,7 @@ received_shifted = bytes(received_bytes[1:]) + b'\x00'
 original_path = '/tmp/original_audio.wav'
 echo_path = '/tmp/echo_audio.wav'
 
-for path, data in [(original_path, audio_bytes), (echo_path, received_shifted)]:
+for path, data in [(original_path, bytes(audio_bytes)), (echo_path, received_shifted)]:
     with wave.open(path, 'w') as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
@@ -71,7 +63,7 @@ for path, data in [(original_path, audio_bytes), (echo_path, received_shifted)]:
 
 # --- Results ---
 print(f"\n{'='*50}")
-print(f"SPI Transfer: {elapsed:.1f}s for {RECORD_SECONDS}s of audio")
+print(f"SPI Transfer: {elapsed:.1f}s for {DURATION}s of audio")
 print(f"Bytes:        {len(audio_bytes)}")
 print(f"Errors:       {total_errors}")
 print(f"Accuracy:     {100 - error_pct:.4f}%")
