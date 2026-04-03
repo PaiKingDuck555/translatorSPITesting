@@ -46,8 +46,14 @@
 
 int main(void) {
     // Step 1: Enable clocks
-    RCC_AHB1ENR |= (1 << 0);   // GPIOA clock enable
+    RCC_AHB1ENR |= (1 << 0) | (1 << 1);  // GPIOA + GPIOB clock enable
     RCC_APB2ENR |= (1 << 12);  // SPI1 clock enable
+
+    // Configure PB0 as output (debug timing pin)
+    // Connect to Saleae CH3 to see CPU processing time
+    GPIOB_MODER &= ~(3 << 0);
+    GPIOB_MODER |=  (1 << 0);  // PB0 = output
+    GPIOB_ODR &= ~(1 << 0);    // start LOW
 
     // Step 2: Configure PA5 (SCK), PA6 (MISO), PA7 (MOSI)
     GPIOA_MODER &= ~((3 << 10) | (3 << 12) | (3 << 14));
@@ -63,18 +69,19 @@ int main(void) {
     SPI1_DR = 0xAA;
     SPI1_CR1 |= (1 << 6);     // SPE = 1
 
-    // Main loop: absolute bare minimum — read and echo, nothing else
+    // Main loop
     while (1) {
         uint32_t sr = SPI1_SR;
 
         if (sr & SPI_SR_OVR) {
-            // Clear overrun: read DR then read SR (required by hardware)
             (void)SPI1_DR;
             (void)SPI1_SR;
         }
 
         if (sr & SPI_SR_RXNE) {
-            SPI1_DR = (uint8_t)SPI1_DR;  // read + echo in one line
+            GPIOB_ODR |= (1 << 0);          // PB0 HIGH — start processing
+            SPI1_DR = (uint8_t)SPI1_DR;      // read + echo
+            GPIOB_ODR &= ~(1 << 0);         // PB0 LOW  — done processing
         }
     }
 }
