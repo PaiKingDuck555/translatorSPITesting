@@ -19,7 +19,7 @@ print("Release to transcribe with Whisper.\n")
 # Load Whisper model once at startup
 print("Loading Whisper model (this takes a moment)...")
 import whisper
-model = whisper.load_model("base")
+model = whisper.load_model("tiny")
 print("Ready!\n")
 
 while True:
