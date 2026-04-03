@@ -22,9 +22,15 @@ import whisper
 model = whisper.load_model("tiny")
 print("Ready!\n")
 
+poll_count = 0
 while True:
     # Poll for button press
     resp = spi.xfer2([0x00])
+    poll_count += 1
+
+    # Debug: print every 100th poll so you can see what's coming back
+    if poll_count % 100 == 0:
+        print(f"  [poll] response: 0x{resp[0]:02X}", end='\r', flush=True)
 
     if resp[0] != IDLE_MARKER:
         # Button is pressed — start collecting audio
