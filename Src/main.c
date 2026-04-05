@@ -1,9 +1,9 @@
 /**
  ******************************************************************************
  * @file           : main.c
- * @brief          : Timer-driven ADC mic sampling + SPI slave + button
- *                   TIM2 triggers ADC at 16 kHz into a ring buffer.
- *                   SPI sends buffered samples to Pi on request.
+ * @brief          : Record audio from MAX9814 mic via ADC, dump over UART
+ *                   Press blue button to record, release to send over serial.
+ *                   No SPI, no Pi — just STM32 → Mac over USB serial.
  ******************************************************************************
  */
 
@@ -21,14 +21,7 @@
 // GPIOC (button on PC13)
 #define GPIOC_IDR     (*(volatile uint32_t *)0x40020810)
 
-// SPI1
-#define SPI1_CR1      (*(volatile uint32_t *)0x40013000)
-#define SPI1_CR2      (*(volatile uint32_t *)0x40013004)
-#define SPI1_SR       (*(volatile uint32_t *)0x40013008)
-#define SPI1_DR       (*(volatile uint32_t *)0x4001300C)
-#define SPI_SR_RXNE   (1 << 0)
-
-// ADC1
+// ADC1 (PA0 = channel 0)
 #define ADC1_SR       (*(volatile uint32_t *)0x40012000)
 #define ADC1_CR1      (*(volatile uint32_t *)0x40012004)
 #define ADC1_CR2      (*(volatile uint32_t *)0x40012008)
@@ -36,127 +29,137 @@
 #define ADC1_SQR3     (*(volatile uint32_t *)0x40012034)
 #define ADC1_DR       (*(volatile uint32_t *)0x4001204C)
 
-// TIM2 (APB1, used to trigger ADC at 16 kHz)
+// TIM2 (16 kHz sample timer)
 #define TIM2_CR1      (*(volatile uint32_t *)0x40000000)
 #define TIM2_DIER     (*(volatile uint32_t *)0x4000000C)
 #define TIM2_SR       (*(volatile uint32_t *)0x40000010)
 #define TIM2_PSC      (*(volatile uint32_t *)0x40000028)
 #define TIM2_ARR      (*(volatile uint32_t *)0x4000002C)
 
+// USART2 (PA2=TX, goes through ST-Link USB to Mac)
+#define USART2_SR     (*(volatile uint32_t *)0x40004400)
+#define USART2_DR     (*(volatile uint32_t *)0x40004404)
+#define USART2_BRR    (*(volatile uint32_t *)0x40004408)
+#define USART2_CR1    (*(volatile uint32_t *)0x4000440C)
+
 // NVIC
 #define NVIC_ISER0    (*(volatile uint32_t *)0xE000E100)
 
-// Ring buffer for ADC samples
-#define BUFFER_SIZE 4096
-static volatile uint16_t audio_buffer[BUFFER_SIZE];
-static volatile uint32_t buf_write = 0;  // ISR writes here
-static volatile uint32_t buf_read = 0;   // main loop reads here
-static volatile uint8_t recording = 0;   // 1 = button held, sampling active
+// Audio buffer in RAM — 128KB total, use ~60KB for audio
+// 30000 samples × 2 bytes = 60000 bytes = ~1.9 seconds at 16 kHz
+#define MAX_SAMPLES 30000
+static volatile uint16_t audio_buffer[MAX_SAMPLES];
+static volatile uint32_t sample_count = 0;
+static volatile uint8_t recording = 0;
 
-// Idle marker
-#define IDLE_MARKER   0xFF
-
-// Button debounce
-static uint8_t button_stable = 0;
-static uint32_t debounce_count = 0;
-#define DEBOUNCE_THRESHOLD 5000
-
-// TIM2 interrupt handler — called at 16 kHz
+// TIM2 ISR — called at 16 kHz
 void TIM2_IRQHandler(void) {
-    TIM2_SR = 0;  // clear interrupt flag
+    TIM2_SR = 0;  // clear flag
 
     if (!recording) return;
+    if (sample_count >= MAX_SAMPLES) return;  // buffer full
 
-    // Start ADC conversion
-    ADC1_CR2 |= (1 << 30);  // SWSTART
-    while (!(ADC1_SR & (1 << 1)));  // wait EOC
+    ADC1_CR2 |= (1 << 30);              // start conversion
+    while (!(ADC1_SR & (1 << 1)));       // wait EOC
+    audio_buffer[sample_count++] = ADC1_DR & 0xFFF;
+}
 
-    uint16_t sample = ADC1_DR & 0xFFF;  // 12-bit value
+static void uart_send_byte(uint8_t b) {
+    while (!(USART2_SR & (1 << 7)));     // wait TXE
+    USART2_DR = b;
+}
 
-    // Store in ring buffer
-    uint32_t next = (buf_write + 1) % BUFFER_SIZE;
-    if (next != buf_read) {  // don't overwrite unread data
-        audio_buffer[buf_write] = sample;
-        buf_write = next;
-    }
+static void uart_send_string(const char *s) {
+    while (*s) uart_send_byte(*s++);
 }
 
 int main(void) {
     // --- Enable clocks ---
     RCC_AHB1ENR |= (1 << 0) | (1 << 2);   // GPIOA + GPIOC
-    RCC_APB1ENR |= (1 << 0);               // TIM2
-    RCC_APB2ENR |= (1 << 8) | (1 << 12);   // ADC1 + SPI1
+    RCC_APB1ENR |= (1 << 0) | (1 << 17);  // TIM2 + USART2
+    RCC_APB2ENR |= (1 << 8);               // ADC1
 
-    // --- PA0 = analog input (ADC channel 0) ---
+    // --- PA0 = analog (mic) ---
     GPIOA_MODER |= (3 << 0);
+
+    // --- PA2 = USART2 TX (AF7) ---
+    GPIOA_MODER &= ~(3 << 4);
+    GPIOA_MODER |= (2 << 4);               // PA2 = alternate function
+    GPIOA_AFRL &= ~(0xF << 8);
+    GPIOA_AFRL |= (7 << 8);                // AF7 = USART2
+
+    // --- Configure USART2: 115200 baud ---
+    // APB1 = 16 MHz, BRR = 16000000 / 115200 ≈ 139 = 0x8B
+    USART2_BRR = 0x8B;
+    USART2_CR1 = (1 << 13) | (1 << 3);     // UE + TE (enable UART, enable TX)
 
     // --- Configure ADC1 ---
     ADC1_CR1 = 0;
     ADC1_CR2 = 0;
-    ADC1_SMPR2 = (3 << 0);   // channel 0: 56 cycles sample time
-    ADC1_SQR3 = 0;            // first conversion = channel 0
-    ADC1_CR2 |= (1 << 0);    // ADON
+    ADC1_SMPR2 = (3 << 0);                 // 56 cycles sample time
+    ADC1_SQR3 = 0;                          // channel 0
+    ADC1_CR2 |= (1 << 0);                  // ADON
     for (volatile int i = 0; i < 1000; i++);
 
-    // --- Configure TIM2 for 16 kHz interrupt ---
-    // CPU = 16 MHz (HSI default)
-    // 16,000,000 / 16,000 = 1000
-    // PSC = 0, ARR = 999 → interrupt every 1000 clocks = 16 kHz
+    // --- Configure TIM2 for 16 kHz ---
     TIM2_PSC = 0;
-    TIM2_ARR = 999;
-    TIM2_DIER |= (1 << 0);   // enable update interrupt
-    NVIC_ISER0 |= (1 << 28); // enable TIM2 IRQ (position 28)
-    TIM2_CR1 |= (1 << 0);    // start timer
+    TIM2_ARR = 999;                         // 16MHz / 1000 = 16kHz
+    TIM2_DIER |= (1 << 0);                 // update interrupt enable
+    NVIC_ISER0 |= (1 << 28);               // enable TIM2 in NVIC
+    TIM2_CR1 |= (1 << 0);                  // start timer
 
-    // --- Configure SPI1 (PA5=SCK, PA6=MISO, PA7=MOSI) ---
-    GPIOA_MODER &= ~((3 << 10) | (3 << 12) | (3 << 14));
-    GPIOA_MODER |=  ((2 << 10) | (2 << 12) | (2 << 14));
-    GPIOA_AFRL &= ~((0xF << 20) | (0xF << 24) | (0xF << 28));
-    GPIOA_AFRL |=  ((5 << 20) | (5 << 24) | (5 << 28));
+    // --- Button debounce ---
+    uint8_t button_stable = 0;
+    uint32_t debounce_count = 0;
 
-    SPI1_CR1 = 0;
-    SPI1_CR1 |= (1 << 9);    // SSM = 1
-    SPI1_CR2 = 0;
-    SPI1_DR = IDLE_MARKER;
-    SPI1_CR1 |= (1 << 6);    // SPE = 1
+    uart_send_string("Ready. Press blue button to record.\r\n");
 
-    // --- Main loop ---
     while (1) {
-        // Debounce button (PC13, active LOW)
+        // Debounce
         uint8_t raw = !(GPIOC_IDR & (1 << 13));
         if (raw == button_stable) {
             debounce_count = 0;
         } else {
             debounce_count++;
-            if (debounce_count >= DEBOUNCE_THRESHOLD) {
+            if (debounce_count >= 50000) {
                 button_stable = raw;
                 debounce_count = 0;
-                if (!button_stable) {
-                    // Button released — reset buffer
-                    recording = 0;
-                } else {
+
+                if (button_stable) {
                     // Button pressed — start recording
-                    buf_write = 0;
-                    buf_read = 0;
+                    sample_count = 0;
                     recording = 1;
+                    uart_send_string("Recording...\r\n");
+                } else {
+                    // Button released — stop and dump audio
+                    recording = 0;
+
+                    // Send header: "AUDIO:<sample_count>\n"
+                    uart_send_string("AUDIO:");
+                    // Send sample count as decimal string
+                    char num[12];
+                    int n = sample_count;
+                    int len = 0;
+                    if (n == 0) num[len++] = '0';
+                    else {
+                        char tmp[12];
+                        int tlen = 0;
+                        while (n > 0) { tmp[tlen++] = '0' + (n % 10); n /= 10; }
+                        for (int i = tlen - 1; i >= 0; i--) num[len++] = tmp[i];
+                    }
+                    num[len] = 0;
+                    uart_send_string(num);
+                    uart_send_string("\r\n");
+
+                    // Send raw 12-bit samples as 2 bytes each (little-endian)
+                    for (uint32_t i = 0; i < sample_count; i++) {
+                        uint16_t s = audio_buffer[i];
+                        uart_send_byte(s & 0xFF);         // low byte
+                        uart_send_byte((s >> 8) & 0xFF);  // high byte
+                    }
+
+                    uart_send_string("DONE\r\n");
                 }
-            }
-        }
-
-        // SPI: respond to Pi polls
-        if (SPI1_SR & SPI_SR_RXNE) {
-            (void)SPI1_DR;  // discard Pi's byte
-
-            if (button_stable && buf_read != buf_write) {
-                // Send next sample from ring buffer as 2 bytes
-                // High byte first, then low byte on next poll
-                uint16_t sample = audio_buffer[buf_read];
-                buf_read = (buf_read + 1) % BUFFER_SIZE;
-
-                // Send high byte (top 8 bits of 12-bit sample)
-                SPI1_DR = (uint8_t)(sample >> 4);
-            } else {
-                SPI1_DR = IDLE_MARKER;
             }
         }
     }
